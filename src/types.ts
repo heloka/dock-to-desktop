@@ -35,6 +35,8 @@ export interface BrowserWindowLike {
   isVisible(): boolean;
   moveBottom?(): void;
   on(event: "closed" | "minimize" | "resize" | "show", callback: () => void): void;
+  prependOnceListener(event: "close", callback: (event: WindowCloseEventLike) => void): void;
+  removeListener(event: "close", callback: (event: WindowCloseEventLike) => void): void;
   restore(): void;
   setAlwaysOnTop(flag: boolean, level?: string): void;
   setBounds(bounds: Rectangle, animate?: boolean): void;
@@ -42,6 +44,10 @@ export interface BrowserWindowLike {
   setResizable(resizable: boolean): void;
   setSkipTaskbar(skip: boolean): void;
   show(): void;
+}
+
+export interface WindowCloseEventLike {
+  preventDefault(): void;
 }
 
 export interface ScreenLike {

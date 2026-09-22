@@ -4,6 +4,7 @@ import { boundsDiffer, NativeReflowGuard, ReflowCircuitBreaker, shouldReflowForD
 import { clampDockWidth, computeDockRect, computeDockRectFromWidth, dockWidthPercent } from "./geometry";
 import { getBrowserWindowForDom, nativeInteger } from "./electron";
 import { SerialExecutor } from "./serial";
+import { detachWindowFromObsidianTray, type TrayCompatibilityStatus } from "./tray-compat";
 import type { BrowserWindowLike, DisplayLike, DockSettings, ElectronRemoteLike, Rectangle, ScreenLike } from "./types";
 import { hideWindowCompletely, prepareWindowForShow } from "./window-visibility";
 
@@ -24,6 +25,7 @@ export interface WindowSnapshot {
   displayId: number | null;
   nativeModeDisabledForSession: boolean;
   state: WindowState;
+  trayCompatibility: TrayCompatibilityStatus;
 }
 
 export class DockWindowManager {
@@ -47,6 +49,7 @@ export class DockWindowManager {
   private pendingPersistPercent: number | null = null;
   private runtimeWidthPercent: number | null = null;
   private programmaticBounds: Rectangle | null = null;
+  private trayCompatibility: TrayCompatibilityStatus = "not-detected";
   private fullScreenAppOpen: boolean | null = null;
   private readonly displayTopologyChanged = (): void => { void this.serial.run(() => this.reflow(false)); };
   private readonly displayMetricsChanged = (...args: unknown[]): void => {
@@ -114,7 +117,8 @@ export class DockWindowManager {
       browserWindowId: this.browserWindow?.id ?? null,
       displayId: this.targetDisplayId,
       nativeModeDisabledForSession: this.nativeDisabledForSession,
-      state: this.state
+      state: this.state,
+      trayCompatibility: this.trayCompatibility
     };
   }
 
@@ -205,6 +209,12 @@ export class DockWindowManager {
       this.domWindow = domWindow;
       this.browserWindow = browserWindow;
       browserWindow.on("closed", () => this.onWindowClosed(browserWindow));
+      this.trayCompatibility = await detachWindowFromObsidianTray(this.app, browserWindow);
+      if (browserWindow.isDestroyed()) throw new Error("Tray 兼容处理期间速记窗口被关闭，请重新呼出后再试。");
+      if (this.trayCompatibility === "failed") {
+        console.warn("[DockToDesktop] Obsidian Tray detected but the quick note window is still tracked");
+        new Notice("Dock to Desktop：检测到 Obsidian Tray，但未能从其窗口集合中分离速记窗口；老板键仍可能同时影响速记窗口。", 9000);
+      }
       browserWindow.on("minimize", () => {
         if (browserWindow !== this.browserWindow || this.state !== "visible") return;
         void this.serial.run(() => this.hide());

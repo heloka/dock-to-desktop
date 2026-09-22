@@ -143,6 +143,7 @@ export default class DockToDesktopPlugin extends Plugin {
       `- AppBar 接口：${snapshot?.appbar.available ? "可用" : "不可用"}`,
       `- AppBar 已注册：${snapshot?.appbar.registered ? "是" : "否"}`,
       `- 原生模式已被熔断：${snapshot?.nativeModeDisabledForSession ? "是" : "否"}`,
+      `- Tray 兼容状态：${snapshot?.trayCompatibility ?? "未检测"}`,
       `- AppBar 错误：${snapshot?.appbar.error ?? "无"}`,
       `- 速记路径：${pathValidation.ok ? pathValidation.path : `无效（${pathValidation.reason}）`}`,
       "",
