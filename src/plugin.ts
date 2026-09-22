@@ -1,6 +1,7 @@
 import path from "node:path";
 import { apiVersion, FileSystemAdapter, Notice, Platform, Plugin, TFile } from "obsidian";
 import { WindowsAppBar } from "./appbar";
+import { WindowsAdjacentWindow } from "./adjacent-window";
 import { getElectronRemote } from "./electron";
 import { GlobalHotkeyManager } from "./hotkey";
 import { ensureQuickNote } from "./note";
@@ -40,10 +41,12 @@ export default class DockToDesktopPlugin extends Plugin {
     }
     const pluginDir = path.join(adapter.getBasePath(), this.manifest.dir ?? `.obsidian/plugins/${this.manifest.id}`);
     this.appbar = new WindowsAppBar(pluginDir);
+    const adjacentWindow = new WindowsAdjacentWindow(pluginDir);
     this.windowManager = new DockWindowManager(
       this.app,
       remote,
       this.appbar,
+      adjacentWindow,
       () => this.settings,
       () => ensureQuickNote(this.app.vault, this.settings.notePath),
       async (widthPercent) => {
@@ -142,6 +145,9 @@ export default class DockToDesktopPlugin extends Plugin {
       `- 目标显示器 ID：${snapshot?.displayId ?? "无"}`,
       `- AppBar 接口：${snapshot?.appbar.available ? "可用" : "不可用"}`,
       `- AppBar 已注册：${snapshot?.appbar.registered ? "是" : "否"}`,
+      `- 相邻窗口接口：${snapshot?.adjacentWindow.available ? "可用" : "不可用"}`,
+      `- 正在联动原前台窗口：${snapshot?.adjacentWindow.managed ? "是" : "否"}`,
+      `- 相邻窗口错误：${snapshot?.adjacentWindow.error ?? "无"}`,
       `- 原生模式已被熔断：${snapshot?.nativeModeDisabledForSession ? "是" : "否"}`,
       `- Tray 兼容状态：${snapshot?.trayCompatibility ?? "未检测"}`,
       `- AppBar 错误：${snapshot?.appbar.error ?? "无"}`,

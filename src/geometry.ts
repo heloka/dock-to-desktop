@@ -29,6 +29,17 @@ export function computeDockRectFromWidth(area: Rectangle, requestedWidth: number
   };
 }
 
+export function computeAdjacentRect(workArea: Rectangle, dockBounds: Rectangle, side: DockSide): Rectangle {
+  const workAreaRight = workArea.x + workArea.width;
+  const dockBoundary = side === "left"
+    ? dockBounds.x + dockBounds.width
+    : dockBounds.x;
+  const boundary = Math.min(workAreaRight, Math.max(workArea.x, dockBoundary));
+  return side === "left"
+    ? { x: boundary, y: workArea.y, width: Math.max(1, workAreaRight - boundary), height: workArea.height }
+    : { x: workArea.x, y: workArea.y, width: Math.max(1, boundary - workArea.x), height: workArea.height };
+}
+
 export function dockWidthPercent(areaWidth: number, width: number): number {
   if (areaWidth <= 0) return MIN_DOCK_PERCENT;
   const percent = clampDockWidth(areaWidth, width) / areaWidth * 100;

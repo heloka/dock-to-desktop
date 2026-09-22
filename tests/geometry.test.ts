@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clampDockWidth, computeDockRect, computeDockRectFromWidth, dockWidthPercent, physicalToDipFallback, screenRectToDip } from "../src/geometry";
+import { clampDockWidth, computeAdjacentRect, computeDockRect, computeDockRectFromWidth, dockWidthPercent, physicalToDipFallback, screenRectToDip } from "../src/geometry";
 
 test("docks to either edge and preserves room for another window", () => {
   assert.deepEqual(computeDockRect({ x: 0, y: 0, width: 1920, height: 1040 }, 25, "right"), {
@@ -26,6 +26,16 @@ test("anchors an interactively resized dock to its configured screen edge", () =
   });
   assert.deepEqual(computeDockRectFromWidth({ x: -1920, y: 0, width: 1920, height: 1040 }, 713, "left"), {
     x: -1920, y: 0, width: 713, height: 1040
+  });
+});
+
+test("fills the remaining work area beside either dock edge", () => {
+  const workArea = { x: 0, y: 0, width: 1920, height: 1040 };
+  assert.deepEqual(computeAdjacentRect(workArea, { x: 1440, y: 0, width: 480, height: 1080 }, "right"), {
+    x: 0, y: 0, width: 1440, height: 1040
+  });
+  assert.deepEqual(computeAdjacentRect(workArea, { x: 0, y: 0, width: 640, height: 1080 }, "left"), {
+    x: 640, y: 0, width: 1280, height: 1040
   });
 });
 

@@ -1,7 +1,8 @@
 import { MarkdownView, Notice, type App, type TFile, type WorkspaceLeaf } from "obsidian";
 import { WindowsAppBar } from "./appbar";
+import { WindowsAdjacentWindow } from "./adjacent-window";
 import { boundsDiffer, NativeReflowGuard, ReflowCircuitBreaker, shouldReflowForDisplayMetrics } from "./event-policy";
-import { clampDockWidth, computeDockRect, computeDockRectFromWidth, dockWidthPercent } from "./geometry";
+import { clampDockWidth, computeAdjacentRect, computeDockRect, computeDockRectFromWidth, dockWidthPercent } from "./geometry";
 import { getBrowserWindowForDom, nativeInteger } from "./electron";
 import { SerialExecutor } from "./serial";
 import { detachWindowFromObsidianTray, type TrayCompatibilityStatus } from "./tray-compat";
@@ -20,6 +21,7 @@ const PROGRAMMATIC_BOUNDS_MARK_MS = 250;
 type WindowState = "hidden" | "creating" | "visible" | "disposed";
 
 export interface WindowSnapshot {
+  adjacentWindow: ReturnType<WindowsAdjacentWindow["status"]>;
   appbar: ReturnType<WindowsAppBar["status"]>;
   browserWindowId: number | null;
   displayId: number | null;
@@ -35,8 +37,10 @@ export class DockWindowManager {
   private domWindow: Window | null = null;
   private browserWindow: BrowserWindowLike | null = null;
   private targetDisplayId: number | null = null;
+  private baseWorkArea: Rectangle | null = null;
   private screen: ScreenLike;
   private nativeWarningShown = false;
+  private adjacentWarningShown = false;
   private readonly nativeReflowGuard = new NativeReflowGuard();
   private readonly reflowCircuitBreaker = new ReflowCircuitBreaker();
   private nativeDisabledForSession = false;
@@ -64,6 +68,7 @@ export class DockWindowManager {
     private readonly app: App,
     private readonly remote: ElectronRemoteLike,
     private readonly appbar: WindowsAppBar,
+    private readonly adjacentWindow: WindowsAdjacentWindow,
     private readonly getSettings: () => DockSettings,
     private readonly ensureNote: () => Promise<TFile>,
     private readonly persistWidthPercent: (widthPercent: number) => Promise<void>
@@ -107,12 +112,14 @@ export class DockWindowManager {
         hideWindowCompletely(this.browserWindow);
         this.scheduleHideVerification(this.browserWindow);
       }
+      this.restoreAdjacentWindow();
       this.fullScreenAppOpen = null;
     });
   }
 
   snapshot(): WindowSnapshot {
     return {
+      adjacentWindow: this.adjacentWindow.status(),
       appbar: this.appbar.status(),
       browserWindowId: this.browserWindow?.id ?? null,
       displayId: this.targetDisplayId,
@@ -135,6 +142,7 @@ export class DockWindowManager {
     this.screen.removeListener("display-removed", this.displayTopologyChanged);
     this.screen.removeListener("display-metrics-changed", this.displayMetricsChanged);
     this.appbar.remove();
+    this.restoreAdjacentWindow();
     const browserWindow = this.browserWindow;
     this.browserWindow = null;
     this.leaf = null;
@@ -148,12 +156,15 @@ export class DockWindowManager {
   private async show(): Promise<void> {
     this.state = "creating";
     try {
+      const display = this.screen.getDisplayNearestPoint(this.screen.getCursorScreenPoint());
+      this.targetDisplayId = display.id;
+      this.baseWorkArea = { ...display.workArea };
+      this.adjacentWindow.captureForeground(this.screen, display);
       const file = await this.ensureNote();
       if (this.isDisposed()) return;
       await this.ensureWindow(file);
       if (this.isDisposed() || !this.browserWindow || !this.leaf) return;
 
-      this.targetDisplayId = this.screen.getDisplayNearestPoint(this.screen.getCursorScreenPoint()).id;
       await this.positionWindow(true);
       if (this.isDisposed() || !this.browserWindow) return;
       this.clearHideVerificationTimer();
@@ -165,6 +176,7 @@ export class DockWindowManager {
       this.focusEditorSoon();
     } catch (error) {
       this.appbar.remove();
+      this.restoreAdjacentWindow();
       if (!this.isDisposed()) this.state = "hidden";
       new Notice(`Dock to Desktop：${error instanceof Error ? error.message : String(error)}`, 8000);
     }
@@ -181,6 +193,7 @@ export class DockWindowManager {
       hideWindowCompletely(this.browserWindow);
       this.scheduleHideVerification(this.browserWindow);
     }
+    this.restoreAdjacentWindow();
     this.fullScreenAppOpen = null;
     this.reflowCircuitBreaker.reset();
   }
@@ -249,10 +262,14 @@ export class DockWindowManager {
       const bounds = explorerRestarted
         ? this.appbar.reregister(this.screen, display, settings)
         : this.appbar.reposition(this.screen, display, settings);
-      if (bounds) this.setWindowBoundsIfChanged(bounds);
+      if (bounds) {
+        this.setWindowBoundsIfChanged(bounds);
+        this.syncAdjacentWindow(bounds, settings.side);
+      }
       else await this.positionWindow(false);
     } catch (error) {
       this.appbar.remove();
+      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       this.warnNativeFallback(error);
     }
@@ -265,6 +282,7 @@ export class DockWindowManager {
     if (!display) throw new Error("没有找到可用的显示器。");
     const settings = this.getEffectiveSettings();
     if (this.nativeDisabledForSession) {
+      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       return;
     }
@@ -273,8 +291,10 @@ export class DockWindowManager {
     try {
       const approved = this.appbar.register(browserWindow, this.screen, display, settings);
       this.setWindowBoundsIfChanged(approved);
+      this.syncAdjacentWindow(approved, settings.side);
     } catch (error) {
       this.appbar.remove();
+      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       this.warnNativeFallback(error);
     }
@@ -287,7 +307,9 @@ export class DockWindowManager {
     if (selected) return selected;
     if (!displays.length) return null;
     const replacement = this.screen.getDisplayNearestPoint(this.screen.getCursorScreenPoint());
+    this.restoreAdjacentWindow();
     this.targetDisplayId = replacement.id;
+    this.baseWorkArea = { ...replacement.workArea };
     return replacement;
   }
 
@@ -317,6 +339,7 @@ export class DockWindowManager {
       hideWindowCompletely(this.browserWindow);
       this.scheduleHideVerification(this.browserWindow);
     }
+    this.restoreAdjacentWindow();
     console.error("[DockToDesktop] Native layout circuit breaker tripped");
     new Notice("Dock to Desktop：检测到连续窗口重排，已自动释放分屏并收起窗口。本次 Obsidian 会话将改用普通置顶模式。", 10000);
   }
@@ -415,6 +438,7 @@ export class DockWindowManager {
     if (this.nativeDisabledForSession || !this.appbar.isRegistered) {
       appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
       this.setWindowBoundsIfChanged(appliedBounds);
+      this.restoreAdjacentWindow();
     } else {
       this.suppressNativePositionNotifications();
       try {
@@ -422,8 +446,10 @@ export class DockWindowManager {
           ?? computeDockRectFromWidth(display.bounds, requestedWidth, settings.side);
         this.setWindowBoundsIfChanged(appliedBounds);
         this.appbar.windowPositionChanged();
+        this.syncAdjacentWindow(appliedBounds, settings.side);
       } catch (error) {
         this.appbar.remove();
+        this.restoreAdjacentWindow();
         appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
         this.setWindowBoundsIfChanged(appliedBounds);
         this.warnNativeFallback(error);
@@ -486,6 +512,25 @@ export class DockWindowManager {
     browserWindow.setBounds(bounds, false);
   }
 
+  private syncAdjacentWindow(dockBounds: Rectangle, side: DockSettings["side"]): void {
+    if (!this.appbar.isRegistered || !this.baseWorkArea) return;
+    try {
+      this.adjacentWindow.arrange(this.screen, computeAdjacentRect(this.baseWorkArea, dockBounds, side));
+    } catch (error) {
+      this.adjacentWindow.restore();
+      console.error("[DockToDesktop] Could not resize the previous foreground window", error);
+      if (!this.adjacentWarningShown) {
+        this.adjacentWarningShown = true;
+        new Notice(`Dock to Desktop：浏览器联动调整失败，分屏保留区仍然有效。${error instanceof Error ? error.message : String(error)}`, 8000);
+      }
+    }
+  }
+
+  private restoreAdjacentWindow(): void {
+    this.adjacentWindow.restore();
+    this.baseWorkArea = null;
+  }
+
   private markProgrammaticBounds(bounds: Rectangle): void {
     this.programmaticBounds = { ...bounds };
     if (this.programmaticBoundsTimer !== null) clearTimeout(this.programmaticBoundsTimer);
@@ -518,6 +563,7 @@ export class DockWindowManager {
     this.clearInteractiveResizeTimer();
     void this.flushWidthPersistence();
     this.appbar.remove();
+    this.restoreAdjacentWindow();
     this.browserWindow = null;
     this.domWindow = null;
     this.leaf = null;
