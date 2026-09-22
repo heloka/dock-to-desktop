@@ -2,17 +2,37 @@ import type { DockSide, Rectangle } from "./types";
 
 export const MIN_DOCK_WIDTH = 320;
 export const MIN_REMAINING_WIDTH = 480;
+export const MIN_DOCK_PERCENT = 15;
+export const MAX_DOCK_PERCENT = 60;
 
 export function computeDockRect(area: Rectangle, widthPercent: number, side: DockSide): Rectangle {
-  const requested = Math.round(area.width * Math.min(60, Math.max(15, widthPercent)) / 100);
-  const maximum = Math.max(1, area.width - Math.min(MIN_REMAINING_WIDTH, Math.floor(area.width / 2)));
-  const width = Math.min(maximum, Math.max(Math.min(MIN_DOCK_WIDTH, maximum), requested));
+  const requested = Math.round(area.width * Math.min(MAX_DOCK_PERCENT, Math.max(MIN_DOCK_PERCENT, widthPercent)) / 100);
+  return computeDockRectFromWidth(area, requested, side);
+}
+
+export function clampDockWidth(areaWidth: number, requestedWidth: number): number {
+  const maximumByPercent = Math.round(areaWidth * MAX_DOCK_PERCENT / 100);
+  const maximumByRemainingSpace = Math.max(1, areaWidth - Math.min(MIN_REMAINING_WIDTH, Math.floor(areaWidth / 2)));
+  const maximum = Math.min(maximumByPercent, maximumByRemainingSpace);
+  const minimumByPercent = Math.round(areaWidth * MIN_DOCK_PERCENT / 100);
+  const minimum = Math.min(maximum, Math.max(Math.min(MIN_DOCK_WIDTH, maximum), minimumByPercent));
+  return Math.min(maximum, Math.max(minimum, Math.round(requestedWidth)));
+}
+
+export function computeDockRectFromWidth(area: Rectangle, requestedWidth: number, side: DockSide): Rectangle {
+  const width = clampDockWidth(area.width, requestedWidth);
   return {
     x: side === "left" ? area.x : area.x + area.width - width,
     y: area.y,
     width,
     height: area.height
   };
+}
+
+export function dockWidthPercent(areaWidth: number, width: number): number {
+  if (areaWidth <= 0) return MIN_DOCK_PERCENT;
+  const percent = clampDockWidth(areaWidth, width) / areaWidth * 100;
+  return Math.round(Math.min(MAX_DOCK_PERCENT, Math.max(MIN_DOCK_PERCENT, percent)) * 10) / 10;
 }
 
 export function rectFromEdges(rect: { left: number; top: number; right: number; bottom: number }): Rectangle {

@@ -24,7 +24,7 @@ export function migrateSettings(raw: unknown): DockSettings {
     accelerator,
     notePath,
     side,
-    widthPercent: Math.round(Math.min(60, Math.max(15, requestedWidth)))
+    widthPercent: Math.round(Math.min(60, Math.max(15, requestedWidth)) * 10) / 10
   };
 }
 

@@ -45,7 +45,11 @@ export default class DockToDesktopPlugin extends Plugin {
       remote,
       this.appbar,
       () => this.settings,
-      () => ensureQuickNote(this.app.vault, this.settings.notePath)
+      () => ensureQuickNote(this.app.vault, this.settings.notePath),
+      async (widthPercent) => {
+        this.settings.widthPercent = widthPercent;
+        await this.saveSettings();
+      }
     );
     this.windowManager.start();
 

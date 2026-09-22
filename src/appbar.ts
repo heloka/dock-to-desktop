@@ -1,7 +1,7 @@
 import path from "node:path";
 import { ABE_LEFT, ABE_RIGHT, ABM_ACTIVATE, ABM_REMOVE, ABM_WINDOWPOSCHANGED, queryAndSetPosition, registerAndPosition, type AppBarData } from "./appbar-core";
-import { computeDockRect, edgesFromRect, rectFromEdges, screenRectToDip } from "./geometry";
-import type { BrowserWindowLike, DisplayLike, DockSettings, Rectangle, ScreenLike } from "./types";
+import { computeDockRect, computeDockRectFromWidth, edgesFromRect, rectFromEdges, screenRectToDip } from "./geometry";
+import type { BrowserWindowLike, DisplayLike, DockSettings, DockSide, Rectangle, ScreenLike } from "./types";
 
 interface NativeApi {
   APPBARDATA: unknown;
@@ -84,14 +84,23 @@ export class WindowsAppBar {
   }
 
   reposition(screen: ScreenLike, display: DisplayLike, settings: DockSettings): Rectangle | null {
+    const requestedDip = computeDockRect(display.bounds, settings.widthPercent, settings.side);
+    return this.repositionRect(screen, display, settings.side, requestedDip);
+  }
+
+  repositionToWidth(screen: ScreenLike, display: DisplayLike, side: DockSide, width: number): Rectangle | null {
+    const requestedDip = computeDockRectFromWidth(display.bounds, width, side);
+    return this.repositionRect(screen, display, side, requestedDip);
+  }
+
+  private repositionRect(screen: ScreenLike, display: DisplayLike, side: DockSide, requestedDip: Rectangle): Rectangle | null {
     const api = this.ensureApi();
     if (!api || !this.registered || !this.data || !this.browserWindow) return null;
-    const requestedDip = computeDockRect(display.bounds, settings.widthPercent, settings.side);
     const requestedPhysical = screen.dipToScreenRect(null, requestedDip);
     const monitorPhysical = screen.dipToScreenRect(null, display.bounds);
-    this.data.uEdge = settings.side === "left" ? ABE_LEFT : ABE_RIGHT;
+    this.data.uEdge = side === "left" ? ABE_LEFT : ABE_RIGHT;
     this.data.rc = edgesFromRect({
-      x: settings.side === "left" ? monitorPhysical.x : requestedPhysical.x,
+      x: side === "left" ? monitorPhysical.x : requestedPhysical.x,
       y: monitorPhysical.y,
       width: requestedPhysical.width,
       height: monitorPhysical.height
@@ -99,7 +108,7 @@ export class WindowsAppBar {
     const approved = queryAndSetPosition(
       (message, value) => api.SHAppBarMessage(message, value),
       this.data,
-      settings.side,
+      side,
       requestedPhysical.width
     );
     return this.toDipRect(screen, approved, display, monitorPhysical);

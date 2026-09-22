@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeDockRect, physicalToDipFallback, screenRectToDip } from "../src/geometry";
+import { clampDockWidth, computeDockRect, computeDockRectFromWidth, dockWidthPercent, physicalToDipFallback, screenRectToDip } from "../src/geometry";
 
 test("docks to either edge and preserves room for another window", () => {
   assert.deepEqual(computeDockRect({ x: 0, y: 0, width: 1920, height: 1040 }, 25, "right"), {
@@ -18,6 +18,21 @@ test("converts physical coordinates relative to a mixed-DPI display origin", () 
     { x: -1920, y: 0, width: 1920, height: 1536 },
     1.5
   ), { x: -512, y: 0, width: 512, height: 1024 });
+});
+
+test("anchors an interactively resized dock to its configured screen edge", () => {
+  assert.deepEqual(computeDockRectFromWidth({ x: 0, y: 0, width: 1920, height: 1040 }, 713, "right"), {
+    x: 1207, y: 0, width: 713, height: 1040
+  });
+  assert.deepEqual(computeDockRectFromWidth({ x: -1920, y: 0, width: 1920, height: 1040 }, 713, "left"), {
+    x: -1920, y: 0, width: 713, height: 1040
+  });
+});
+
+test("clamps interactive resizing and persists a precise percentage", () => {
+  assert.equal(clampDockWidth(1920, 100), 320);
+  assert.equal(clampDockWidth(1920, 1600), 1152);
+  assert.equal(dockWidthPercent(1920, 713), 37.1);
 });
 
 test("falls back when Electron rejects a remote object during coordinate conversion", () => {

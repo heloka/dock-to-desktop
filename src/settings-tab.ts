@@ -44,9 +44,9 @@ export class DockSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("停靠宽度")
-      .setDesc("占目标屏幕宽度的百分比。窗口最窄为 320 像素，并至少为其他应用保留 480 像素。")
+      .setDesc("占目标屏幕宽度的百分比。也可直接拖动停靠窗口的内侧边框；旁边的最大化窗口会随之伸缩。")
       .addSlider((slider) => slider
-        .setLimits(15, 60, 1)
+        .setLimits(15, 60, 0.1)
         .setDynamicTooltip()
         .setValue(this.plugin.settings.widthPercent)
         .onChange(async (value) => {

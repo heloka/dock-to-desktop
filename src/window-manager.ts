@@ -1,10 +1,10 @@
 import { MarkdownView, Notice, type App, type TFile, type WorkspaceLeaf } from "obsidian";
 import { WindowsAppBar } from "./appbar";
 import { boundsDiffer, NativeReflowGuard, ReflowCircuitBreaker, shouldReflowForDisplayMetrics } from "./event-policy";
-import { computeDockRect } from "./geometry";
+import { clampDockWidth, computeDockRect, computeDockRectFromWidth, dockWidthPercent } from "./geometry";
 import { getBrowserWindowForDom, nativeInteger } from "./electron";
 import { SerialExecutor } from "./serial";
-import type { BrowserWindowLike, DisplayLike, DockSettings, ElectronRemoteLike, ScreenLike } from "./types";
+import type { BrowserWindowLike, DisplayLike, DockSettings, ElectronRemoteLike, Rectangle, ScreenLike } from "./types";
 import { hideWindowCompletely, prepareWindowForShow } from "./window-visibility";
 
 const ABN_POSCHANGED = 1;
@@ -12,6 +12,9 @@ const ABN_FULLSCREENAPP = 2;
 const WM_ACTIVATE = 0x0006;
 const NATIVE_REFLOW_DEBOUNCE_MS = 150;
 const NATIVE_NOTIFICATION_SUPPRESSION_MS = 1000;
+const INTERACTIVE_RESIZE_INTERVAL_MS = 50;
+const WIDTH_PERSIST_DEBOUNCE_MS = 350;
+const PROGRAMMATIC_BOUNDS_MARK_MS = 250;
 
 type WindowState = "hidden" | "creating" | "visible" | "disposed";
 
@@ -37,6 +40,13 @@ export class DockWindowManager {
   private nativeDisabledForSession = false;
   private positionNotificationTimer: ReturnType<typeof setTimeout> | null = null;
   private hideVerificationTimer: ReturnType<typeof setTimeout> | null = null;
+  private interactiveResizeTimer: ReturnType<typeof setTimeout> | null = null;
+  private widthPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  private programmaticBoundsTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingInteractiveWidth: number | null = null;
+  private pendingPersistPercent: number | null = null;
+  private runtimeWidthPercent: number | null = null;
+  private programmaticBounds: Rectangle | null = null;
   private fullScreenAppOpen: boolean | null = null;
   private readonly displayTopologyChanged = (): void => { void this.serial.run(() => this.reflow(false)); };
   private readonly displayMetricsChanged = (...args: unknown[]): void => {
@@ -52,7 +62,8 @@ export class DockWindowManager {
     private readonly remote: ElectronRemoteLike,
     private readonly appbar: WindowsAppBar,
     private readonly getSettings: () => DockSettings,
-    private readonly ensureNote: () => Promise<TFile>
+    private readonly ensureNote: () => Promise<TFile>,
+    private readonly persistWidthPercent: (widthPercent: number) => Promise<void>
   ) {
     this.screen = remote.screen;
   }
@@ -72,12 +83,21 @@ export class DockWindowManager {
   }
 
   settingsChanged(): Promise<void> {
-    return this.serial.run(() => this.reflow(false));
+    return this.serial.run(() => {
+      this.pendingInteractiveWidth = null;
+      this.clearInteractiveResizeTimer();
+      this.cancelWidthPersistence();
+      this.runtimeWidthPercent = null;
+      return this.reflow(false, false);
+    });
   }
 
   emergencyReset(): Promise<void> {
     return this.serial.run(async () => {
       this.clearPositionNotificationTimer();
+      this.finalizePendingInteractiveWidth();
+      this.clearInteractiveResizeTimer();
+      await this.flushWidthPersistence();
       this.appbar.remove();
       if (this.state !== "disposed") this.state = "hidden";
       if (this.browserWindow && !this.browserWindow.isDestroyed()) {
@@ -100,9 +120,13 @@ export class DockWindowManager {
 
   dispose(): void {
     if (this.state === "disposed") return;
+    this.finalizePendingInteractiveWidth();
+    this.clearInteractiveResizeTimer();
+    void this.flushWidthPersistence();
     this.state = "disposed";
     this.clearPositionNotificationTimer();
     this.clearHideVerificationTimer();
+    this.clearProgrammaticBoundsMarker();
     this.screen.removeListener("display-added", this.displayTopologyChanged);
     this.screen.removeListener("display-removed", this.displayTopologyChanged);
     this.screen.removeListener("display-metrics-changed", this.displayMetricsChanged);
@@ -144,6 +168,9 @@ export class DockWindowManager {
 
   private async hide(): Promise<void> {
     this.clearPositionNotificationTimer();
+    this.finalizePendingInteractiveWidth();
+    this.clearInteractiveResizeTimer();
+    await this.flushWidthPersistence();
     this.appbar.remove();
     if (this.state !== "disposed") this.state = "hidden";
     if (this.browserWindow && !this.browserWindow.isDestroyed()) {
@@ -171,6 +198,7 @@ export class DockWindowManager {
         browserWindow.close();
         return;
       }
+      try { browserWindow.setResizable(true); } catch { /* Obsidian popouts are normally resizable already */ }
       hideWindowCompletely(browserWindow);
       domWindow.document.body.classList.add("dock-to-desktop-window");
       this.leaf = leaf;
@@ -181,6 +209,7 @@ export class DockWindowManager {
         if (browserWindow !== this.browserWindow || this.state !== "visible") return;
         void this.serial.run(() => this.hide());
       });
+      browserWindow.on("resize", () => this.onWindowResize(browserWindow));
       browserWindow.on("show", () => {
         if (browserWindow !== this.browserWindow || this.state === "visible" || this.state === "creating") return;
         hideWindowCompletely(browserWindow);
@@ -192,7 +221,7 @@ export class DockWindowManager {
     }
   }
 
-  private async reflow(explorerRestarted: boolean): Promise<void> {
+  private async reflow(explorerRestarted: boolean, trackCircuitBreaker = true): Promise<void> {
     if (this.state !== "visible" || !this.browserWindow || this.browserWindow.isDestroyed()) return;
     const display = this.getTargetDisplay();
     if (!display) return;
@@ -200,15 +229,16 @@ export class DockWindowManager {
       this.applyFallbackBounds(display);
       return;
     }
-    if (!this.reflowCircuitBreaker.record(Date.now())) {
+    if (trackCircuitBreaker && !this.reflowCircuitBreaker.record(Date.now())) {
       this.tripNativeCircuitBreaker();
       return;
     }
     this.suppressNativePositionNotifications();
+    const settings = this.getEffectiveSettings();
     try {
       const bounds = explorerRestarted
-        ? this.appbar.reregister(this.screen, display, this.getSettings())
-        : this.appbar.reposition(this.screen, display, this.getSettings());
+        ? this.appbar.reregister(this.screen, display, settings)
+        : this.appbar.reposition(this.screen, display, settings);
       if (bounds) this.setWindowBoundsIfChanged(bounds);
       else await this.positionWindow(false);
     } catch (error) {
@@ -223,7 +253,7 @@ export class DockWindowManager {
     if (!browserWindow) return;
     const display = this.getTargetDisplay();
     if (!display) throw new Error("没有找到可用的显示器。");
-    const settings = this.getSettings();
+    const settings = this.getEffectiveSettings();
     if (this.nativeDisabledForSession) {
       this.applyFallbackBounds(display);
       return;
@@ -253,7 +283,8 @@ export class DockWindowManager {
 
   private applyFallbackBounds(display: DisplayLike): void {
     if (!this.browserWindow || this.browserWindow.isDestroyed()) return;
-    this.setWindowBoundsIfChanged(computeDockRect(display.workArea, this.getSettings().widthPercent, this.getSettings().side));
+    const settings = this.getEffectiveSettings();
+    this.setWindowBoundsIfChanged(computeDockRect(display.workArea, settings.widthPercent, settings.side));
   }
 
   private warnNativeFallback(error: unknown): void {
@@ -267,6 +298,9 @@ export class DockWindowManager {
   private tripNativeCircuitBreaker(): void {
     this.nativeDisabledForSession = true;
     this.clearPositionNotificationTimer();
+    this.finalizePendingInteractiveWidth();
+    this.clearInteractiveResizeTimer();
+    void this.flushWidthPersistence();
     this.appbar.remove();
     if (!this.isDisposed()) this.state = "hidden";
     if (this.browserWindow && !this.browserWindow.isDestroyed()) {
@@ -344,10 +378,117 @@ export class DockWindowManager {
     this.hideVerificationTimer = null;
   }
 
-  private setWindowBoundsIfChanged(bounds: { x: number; y: number; width: number; height: number }): void {
+  private onWindowResize(browserWindow: BrowserWindowLike): void {
+    if (browserWindow !== this.browserWindow || this.state !== "visible" || browserWindow.isDestroyed()) return;
+    const bounds = browserWindow.getBounds();
+    if (this.programmaticBounds && !boundsDiffer(bounds, this.programmaticBounds)) return;
+    this.clearProgrammaticBoundsMarker();
+    const display = this.getTargetDisplay();
+    if (!display) return;
+    this.pendingInteractiveWidth = clampDockWidth(display.bounds.width, bounds.width);
+    if (this.interactiveResizeTimer !== null) return;
+    this.interactiveResizeTimer = setTimeout(() => {
+      this.interactiveResizeTimer = null;
+      void this.serial.run(() => this.syncInteractiveResize());
+    }, INTERACTIVE_RESIZE_INTERVAL_MS);
+  }
+
+  private async syncInteractiveResize(): Promise<void> {
+    const requestedWidth = this.pendingInteractiveWidth;
+    this.pendingInteractiveWidth = null;
+    const browserWindow = this.browserWindow;
+    if (requestedWidth === null || this.state !== "visible" || !browserWindow || browserWindow.isDestroyed()) return;
+    const display = this.getTargetDisplay();
+    if (!display) return;
+    const settings = this.getEffectiveSettings();
+    let appliedBounds: Rectangle;
+    if (this.nativeDisabledForSession || !this.appbar.isRegistered) {
+      appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
+      this.setWindowBoundsIfChanged(appliedBounds);
+    } else {
+      this.suppressNativePositionNotifications();
+      try {
+        appliedBounds = this.appbar.repositionToWidth(this.screen, display, settings.side, requestedWidth)
+          ?? computeDockRectFromWidth(display.bounds, requestedWidth, settings.side);
+        this.setWindowBoundsIfChanged(appliedBounds);
+        this.appbar.windowPositionChanged();
+      } catch (error) {
+        this.appbar.remove();
+        appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
+        this.setWindowBoundsIfChanged(appliedBounds);
+        this.warnNativeFallback(error);
+      }
+    }
+    this.queueWidthPersistence(dockWidthPercent(display.bounds.width, appliedBounds.width));
+  }
+
+  private finalizePendingInteractiveWidth(): void {
+    if (this.pendingInteractiveWidth === null) return;
+    const display = this.getTargetDisplay();
+    if (display) this.queueWidthPersistence(dockWidthPercent(display.bounds.width, this.pendingInteractiveWidth));
+    this.pendingInteractiveWidth = null;
+  }
+
+  private clearInteractiveResizeTimer(): void {
+    if (this.interactiveResizeTimer !== null) clearTimeout(this.interactiveResizeTimer);
+    this.interactiveResizeTimer = null;
+  }
+
+  private queueWidthPersistence(widthPercent: number): void {
+    this.runtimeWidthPercent = widthPercent;
+    this.pendingPersistPercent = widthPercent;
+    if (this.widthPersistTimer !== null) clearTimeout(this.widthPersistTimer);
+    this.widthPersistTimer = setTimeout(() => {
+      this.widthPersistTimer = null;
+      void this.flushWidthPersistence();
+    }, WIDTH_PERSIST_DEBOUNCE_MS);
+  }
+
+  private async flushWidthPersistence(): Promise<void> {
+    if (this.widthPersistTimer !== null) clearTimeout(this.widthPersistTimer);
+    this.widthPersistTimer = null;
+    const widthPercent = this.pendingPersistPercent;
+    this.pendingPersistPercent = null;
+    if (widthPercent === null) return;
+    try {
+      await this.persistWidthPercent(widthPercent);
+    } catch (error) {
+      console.error("[DockToDesktop] Could not save interactively resized width", error);
+    }
+  }
+
+  private cancelWidthPersistence(): void {
+    if (this.widthPersistTimer !== null) clearTimeout(this.widthPersistTimer);
+    this.widthPersistTimer = null;
+    this.pendingPersistPercent = null;
+  }
+
+  private getEffectiveSettings(): DockSettings {
+    const settings = this.getSettings();
+    return this.runtimeWidthPercent === null ? settings : { ...settings, widthPercent: this.runtimeWidthPercent };
+  }
+
+  private setWindowBoundsIfChanged(bounds: Rectangle): void {
     const browserWindow = this.browserWindow;
     if (!browserWindow || browserWindow.isDestroyed()) return;
-    if (boundsDiffer(browserWindow.getBounds(), bounds)) browserWindow.setBounds(bounds, false);
+    if (!boundsDiffer(browserWindow.getBounds(), bounds)) return;
+    this.markProgrammaticBounds(bounds);
+    browserWindow.setBounds(bounds, false);
+  }
+
+  private markProgrammaticBounds(bounds: Rectangle): void {
+    this.programmaticBounds = { ...bounds };
+    if (this.programmaticBoundsTimer !== null) clearTimeout(this.programmaticBoundsTimer);
+    this.programmaticBoundsTimer = setTimeout(() => {
+      this.programmaticBoundsTimer = null;
+      this.programmaticBounds = null;
+    }, PROGRAMMATIC_BOUNDS_MARK_MS);
+  }
+
+  private clearProgrammaticBoundsMarker(): void {
+    if (this.programmaticBoundsTimer !== null) clearTimeout(this.programmaticBoundsTimer);
+    this.programmaticBoundsTimer = null;
+    this.programmaticBounds = null;
   }
 
   private focusEditorSoon(): void {
@@ -363,6 +504,9 @@ export class DockWindowManager {
 
   private onWindowClosed(closedWindow: BrowserWindowLike): void {
     if (closedWindow !== this.browserWindow) return;
+    this.finalizePendingInteractiveWidth();
+    this.clearInteractiveResizeTimer();
+    void this.flushWidthPersistence();
     this.appbar.remove();
     this.browserWindow = null;
     this.domWindow = null;
@@ -371,6 +515,7 @@ export class DockWindowManager {
     this.fullScreenAppOpen = null;
     this.clearPositionNotificationTimer();
     this.clearHideVerificationTimer();
+    this.clearProgrammaticBoundsMarker();
     if (!this.isDisposed()) this.state = "hidden";
   }
 

@@ -34,11 +34,12 @@ export interface BrowserWindowLike {
   isMinimized(): boolean;
   isVisible(): boolean;
   moveBottom?(): void;
-  on(event: "closed" | "minimize" | "show", callback: () => void): void;
+  on(event: "closed" | "minimize" | "resize" | "show", callback: () => void): void;
   restore(): void;
   setAlwaysOnTop(flag: boolean, level?: string): void;
   setBounds(bounds: Rectangle, animate?: boolean): void;
   setFocusable(focusable: boolean): void;
+  setResizable(resizable: boolean): void;
   setSkipTaskbar(skip: boolean): void;
   show(): void;
 }
