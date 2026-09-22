@@ -5,6 +5,7 @@ import { computeDockRect } from "./geometry";
 import { getBrowserWindowForDom, nativeInteger } from "./electron";
 import { SerialExecutor } from "./serial";
 import type { BrowserWindowLike, DisplayLike, DockSettings, ElectronRemoteLike, ScreenLike } from "./types";
+import { hideWindowCompletely, prepareWindowForShow } from "./window-visibility";
 
 const ABN_POSCHANGED = 1;
 const ABN_FULLSCREENAPP = 2;
@@ -35,6 +36,7 @@ export class DockWindowManager {
   private readonly reflowCircuitBreaker = new ReflowCircuitBreaker();
   private nativeDisabledForSession = false;
   private positionNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  private hideVerificationTimer: ReturnType<typeof setTimeout> | null = null;
   private fullScreenAppOpen: boolean | null = null;
   private readonly displayTopologyChanged = (): void => { void this.serial.run(() => this.reflow(false)); };
   private readonly displayMetricsChanged = (...args: unknown[]): void => {
@@ -77,12 +79,12 @@ export class DockWindowManager {
     return this.serial.run(async () => {
       this.clearPositionNotificationTimer();
       this.appbar.remove();
+      if (this.state !== "disposed") this.state = "hidden";
       if (this.browserWindow && !this.browserWindow.isDestroyed()) {
-        this.browserWindow.setAlwaysOnTop(false);
-        this.browserWindow.hide();
+        hideWindowCompletely(this.browserWindow);
+        this.scheduleHideVerification(this.browserWindow);
       }
       this.fullScreenAppOpen = null;
-      if (this.state !== "disposed") this.state = "hidden";
     });
   }
 
@@ -100,6 +102,7 @@ export class DockWindowManager {
     if (this.state === "disposed") return;
     this.state = "disposed";
     this.clearPositionNotificationTimer();
+    this.clearHideVerificationTimer();
     this.screen.removeListener("display-added", this.displayTopologyChanged);
     this.screen.removeListener("display-removed", this.displayTopologyChanged);
     this.screen.removeListener("display-metrics-changed", this.displayMetricsChanged);
@@ -125,7 +128,8 @@ export class DockWindowManager {
       this.targetDisplayId = this.screen.getDisplayNearestPoint(this.screen.getCursorScreenPoint()).id;
       await this.positionWindow(true);
       if (this.isDisposed() || !this.browserWindow) return;
-      if (this.browserWindow.isMinimized()) this.browserWindow.restore();
+      this.clearHideVerificationTimer();
+      prepareWindowForShow(this.browserWindow);
       this.browserWindow.setAlwaysOnTop(true, "floating");
       this.browserWindow.show();
       this.browserWindow.focus();
@@ -141,13 +145,13 @@ export class DockWindowManager {
   private async hide(): Promise<void> {
     this.clearPositionNotificationTimer();
     this.appbar.remove();
+    if (this.state !== "disposed") this.state = "hidden";
     if (this.browserWindow && !this.browserWindow.isDestroyed()) {
-      this.browserWindow.setAlwaysOnTop(false);
-      this.browserWindow.hide();
+      hideWindowCompletely(this.browserWindow);
+      this.scheduleHideVerification(this.browserWindow);
     }
     this.fullScreenAppOpen = null;
     this.reflowCircuitBreaker.reset();
-    if (this.state !== "disposed") this.state = "hidden";
   }
 
   private async ensureWindow(file: TFile): Promise<void> {
@@ -167,12 +171,20 @@ export class DockWindowManager {
         browserWindow.close();
         return;
       }
-      browserWindow.hide();
+      hideWindowCompletely(browserWindow);
       domWindow.document.body.classList.add("dock-to-desktop-window");
       this.leaf = leaf;
       this.domWindow = domWindow;
       this.browserWindow = browserWindow;
       browserWindow.on("closed", () => this.onWindowClosed(browserWindow));
+      browserWindow.on("minimize", () => {
+        if (browserWindow !== this.browserWindow || this.state !== "visible") return;
+        void this.serial.run(() => this.hide());
+      });
+      browserWindow.on("show", () => {
+        if (browserWindow !== this.browserWindow || this.state === "visible" || this.state === "creating") return;
+        hideWindowCompletely(browserWindow);
+      });
       this.hookNativeMessages(browserWindow);
     } catch (error) {
       try { leaf.detach(); } catch { /* incomplete popout */ }
@@ -256,11 +268,11 @@ export class DockWindowManager {
     this.nativeDisabledForSession = true;
     this.clearPositionNotificationTimer();
     this.appbar.remove();
-    if (this.browserWindow && !this.browserWindow.isDestroyed()) {
-      this.browserWindow.setAlwaysOnTop(false);
-      this.browserWindow.hide();
-    }
     if (!this.isDisposed()) this.state = "hidden";
+    if (this.browserWindow && !this.browserWindow.isDestroyed()) {
+      hideWindowCompletely(this.browserWindow);
+      this.scheduleHideVerification(this.browserWindow);
+    }
     console.error("[DockToDesktop] Native layout circuit breaker tripped");
     new Notice("Dock to Desktop：检测到连续窗口重排，已自动释放分屏并收起窗口。本次 Obsidian 会话将改用普通置顶模式。", 10000);
   }
@@ -317,6 +329,21 @@ export class DockWindowManager {
     this.nativeReflowGuard.release();
   }
 
+  private scheduleHideVerification(browserWindow: BrowserWindowLike): void {
+    this.clearHideVerificationTimer();
+    this.hideVerificationTimer = setTimeout(() => {
+      this.hideVerificationTimer = null;
+      if (this.state !== "hidden" || browserWindow !== this.browserWindow || browserWindow.isDestroyed()) return;
+      if (browserWindow.isVisible() || browserWindow.isMinimized()) hideWindowCompletely(browserWindow);
+    }, 80);
+  }
+
+  private clearHideVerificationTimer(): void {
+    if (this.hideVerificationTimer === null) return;
+    clearTimeout(this.hideVerificationTimer);
+    this.hideVerificationTimer = null;
+  }
+
   private setWindowBoundsIfChanged(bounds: { x: number; y: number; width: number; height: number }): void {
     const browserWindow = this.browserWindow;
     if (!browserWindow || browserWindow.isDestroyed()) return;
@@ -343,6 +370,7 @@ export class DockWindowManager {
     this.targetDisplayId = null;
     this.fullScreenAppOpen = null;
     this.clearPositionNotificationTimer();
+    this.clearHideVerificationTimer();
     if (!this.isDisposed()) this.state = "hidden";
   }
 

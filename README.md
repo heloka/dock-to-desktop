@@ -1,4 +1,4 @@
-# Dock to Desktop 2.0.2
+# Dock to Desktop 2.0.3
 
 这是一个面向 Windows x64 的 Obsidian 桌面速记插件。Obsidian 仍在运行时，按 `Ctrl+Alt+D` 可以从其他软件中呼出独立的 Obsidian 编辑窗口；再按一次会收起窗口并释放屏幕保留区。
 
@@ -27,7 +27,7 @@
 
 - 原生 AppBar 功能面向 Windows x64；其他环境只会使用回退窗口。
 - 全局快捷键只在 Obsidian 进程仍运行时有效。关闭并退出 Obsidian 后，插件不会驻留后台。
-- 首次呼出可能需要等待 Obsidian 创建弹出窗口；后续切换会复用并隐藏该窗口。
+- 首次呼出可能需要等待 Obsidian 创建弹出窗口；后续切换会复用该窗口。收起后窗口会从桌面、任务栏和 Alt+Tab 列表隐藏。
 - Windows 全屏应用打开时，插件会按 AppBar 通知调整窗口层级。
 
 ## 开发
@@ -44,5 +44,6 @@ npm run build
 
 ## 版本记录
 
+- **2.0.3**：收起速记时真正隐藏原生窗口并移出任务栏和 Alt+Tab；手动最小化也会转换为隐藏并释放屏幕保留区。
 - **2.0.2**：修复 Obsidian remote 桥接拒绝把 `BrowserWindow` 代理传给 DPI 坐标转换接口时，原生 AppBar 被错误回滚的问题。
 - **2.0.1**：阻断 AppBar 工作区变化造成的窗口重排反馈循环；忽略由自身注册产生的 `workArea` 变化，合并系统位置通知，并避免重复写入相同窗口位置。

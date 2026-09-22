@@ -23,6 +23,7 @@ export interface DisplayLike {
 
 export interface BrowserWindowLike {
   id: number;
+  blur(): void;
   close(): void;
   focus(): void;
   getBounds(): Rectangle;
@@ -33,10 +34,12 @@ export interface BrowserWindowLike {
   isMinimized(): boolean;
   isVisible(): boolean;
   moveBottom?(): void;
-  on(event: "closed", callback: () => void): void;
+  on(event: "closed" | "minimize" | "show", callback: () => void): void;
   restore(): void;
   setAlwaysOnTop(flag: boolean, level?: string): void;
   setBounds(bounds: Rectangle, animate?: boolean): void;
+  setFocusable(focusable: boolean): void;
+  setSkipTaskbar(skip: boolean): void;
   show(): void;
 }
 
