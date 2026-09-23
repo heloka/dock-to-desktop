@@ -159,7 +159,7 @@ export class DockWindowManager {
       const display = this.screen.getDisplayNearestPoint(this.screen.getCursorScreenPoint());
       this.targetDisplayId = display.id;
       this.baseWorkArea = { ...display.workArea };
-      this.adjacentWindow.captureForeground(this.screen, display);
+      this.adjacentWindow.captureForeground(this.screen, display, this.getSettings().side, this.ownWindowHandles());
       const file = await this.ensureNote();
       if (this.isDisposed()) return;
       await this.ensureWindow(file);
@@ -269,7 +269,6 @@ export class DockWindowManager {
       else await this.positionWindow(false);
     } catch (error) {
       this.appbar.remove();
-      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       this.warnNativeFallback(error);
     }
@@ -282,7 +281,6 @@ export class DockWindowManager {
     if (!display) throw new Error("没有找到可用的显示器。");
     const settings = this.getEffectiveSettings();
     if (this.nativeDisabledForSession) {
-      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       return;
     }
@@ -294,7 +292,6 @@ export class DockWindowManager {
       this.syncAdjacentWindow(approved, settings.side);
     } catch (error) {
       this.appbar.remove();
-      this.restoreAdjacentWindow();
       this.applyFallbackBounds(display);
       this.warnNativeFallback(error);
     }
@@ -316,7 +313,9 @@ export class DockWindowManager {
   private applyFallbackBounds(display: DisplayLike): void {
     if (!this.browserWindow || this.browserWindow.isDestroyed()) return;
     const settings = this.getEffectiveSettings();
-    this.setWindowBoundsIfChanged(computeDockRect(display.workArea, settings.widthPercent, settings.side));
+    const bounds = computeDockRect(this.baseWorkArea ?? display.workArea, settings.widthPercent, settings.side);
+    this.setWindowBoundsIfChanged(bounds);
+    this.syncAdjacentWindow(bounds, settings.side);
   }
 
   private warnNativeFallback(error: unknown): void {
@@ -436,9 +435,9 @@ export class DockWindowManager {
     const settings = this.getEffectiveSettings();
     let appliedBounds: Rectangle;
     if (this.nativeDisabledForSession || !this.appbar.isRegistered) {
-      appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
+      appliedBounds = computeDockRectFromWidth(this.baseWorkArea ?? display.workArea, requestedWidth, settings.side);
       this.setWindowBoundsIfChanged(appliedBounds);
-      this.restoreAdjacentWindow();
+      this.syncAdjacentWindow(appliedBounds, settings.side);
     } else {
       this.suppressNativePositionNotifications();
       try {
@@ -449,9 +448,9 @@ export class DockWindowManager {
         this.syncAdjacentWindow(appliedBounds, settings.side);
       } catch (error) {
         this.appbar.remove();
-        this.restoreAdjacentWindow();
-        appliedBounds = computeDockRectFromWidth(display.workArea, requestedWidth, settings.side);
+        appliedBounds = computeDockRectFromWidth(this.baseWorkArea ?? display.workArea, requestedWidth, settings.side);
         this.setWindowBoundsIfChanged(appliedBounds);
+        this.syncAdjacentWindow(appliedBounds, settings.side);
         this.warnNativeFallback(error);
       }
     }
@@ -513,7 +512,7 @@ export class DockWindowManager {
   }
 
   private syncAdjacentWindow(dockBounds: Rectangle, side: DockSettings["side"]): void {
-    if (!this.appbar.isRegistered || !this.baseWorkArea) return;
+    if (!this.baseWorkArea) return;
     try {
       this.adjacentWindow.arrange(this.screen, computeAdjacentRect(this.baseWorkArea, dockBounds, side));
     } catch (error) {
@@ -529,6 +528,21 @@ export class DockWindowManager {
   private restoreAdjacentWindow(): void {
     this.adjacentWindow.restore();
     this.baseWorkArea = null;
+  }
+
+  private ownWindowHandles(): bigint[] {
+    const browserWindowClass = this.remote.BrowserWindow as { getAllWindows?: () => BrowserWindowLike[] } | undefined;
+    let windows: BrowserWindowLike[] = [];
+    try { windows = browserWindowClass?.getAllWindows?.() ?? []; } catch { /* use known window */ }
+    try { windows.push(this.remote.getCurrentWindow()); } catch { /* bridge may be shutting down */ }
+    const handles: bigint[] = [];
+    for (const window of windows) {
+      try {
+        const buffer = window.getNativeWindowHandle();
+        if (buffer.length >= 8) handles.push(buffer.readBigUInt64LE(0));
+      } catch { /* window may have closed */ }
+    }
+    return handles;
   }
 
   private markProgrammaticBounds(bounds: Rectangle): void {

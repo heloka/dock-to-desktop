@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { DisplayLike, Rectangle, ScreenLike } from "./types";
+import type { DisplayLike, DockSide, Rectangle, ScreenLike } from "./types";
 
 const SW_MAXIMIZE = 3;
 const SW_RESTORE = 9;
@@ -27,13 +27,16 @@ export interface AdjacentNativeApi {
 
 export interface AdjacentWindowStatus {
   available: boolean;
+  captureResult: string;
   error?: string;
   managed: boolean;
 }
 
 interface ManagedWindow {
   hWnd: unknown;
-  restoredForDock: boolean;
+  initiallyMaximized: boolean;
+  originalBounds: Rectangle;
+  changedForDock: boolean;
 }
 
 export function rectCenterIsInside(rect: NativeRect, area: Rectangle): boolean {
@@ -43,10 +46,22 @@ export function rectCenterIsInside(rect: NativeRect, area: Rectangle): boolean {
     && centerY >= area.y && centerY < area.y + area.height;
 }
 
+export function isFullHeightEdgeWindow(rect: NativeRect, workArea: Rectangle, side: DockSide): boolean {
+  const edgeTolerance = 32;
+  const topTolerance = 32;
+  const visibleHeight = Math.min(rect.bottom, workArea.y + workArea.height) - Math.max(rect.top, workArea.y);
+  if (visibleHeight < workArea.height * 0.8 || Math.abs(rect.top - workArea.y) > topTolerance) return false;
+  return side === "right"
+    ? Math.abs(rect.left - workArea.x) <= edgeTolerance
+    : Math.abs(rect.right - (workArea.x + workArea.width)) <= edgeTolerance;
+}
+
 export class WindowsAdjacentWindow {
   private api: AdjacentNativeApi | null | undefined;
   private loadError: string | undefined;
   private managed: ManagedWindow | null = null;
+  private captureResult = "尚未尝试";
+  private verificationTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly pluginDir: string, api?: AdjacentNativeApi) {
     this.api = api;
@@ -55,27 +70,64 @@ export class WindowsAdjacentWindow {
   status(): AdjacentWindowStatus {
     return {
       available: Boolean(this.ensureApi()),
+      captureResult: this.captureResult,
       error: this.loadError,
       managed: Boolean(this.managed)
     };
   }
 
-  captureForeground(screen: ScreenLike, display: DisplayLike): boolean {
+  captureForeground(screen: ScreenLike, display: DisplayLike, side: DockSide, excludedHandles: readonly bigint[] = []): boolean {
     this.restore();
     const api = this.ensureApi();
-    if (!api) return false;
+    if (!api) {
+      this.captureResult = "Windows 窗口接口不可用";
+      return false;
+    }
     const hWnd = api.GetForegroundWindow();
-    if (!hWnd || !api.IsWindow(hWnd) || !api.IsWindowVisible(hWnd) || !api.IsZoomed(hWnd)) return false;
+    if (!hWnd || !api.IsWindow(hWnd) || !api.IsWindowVisible(hWnd)) {
+      this.captureResult = "没有可用的前台窗口";
+      return false;
+    }
+    if (typeof hWnd === "bigint" && excludedHandles.includes(hWnd)) {
+      this.captureResult = "前台窗口属于 Obsidian";
+      return false;
+    }
 
     const processId: Array<number | null> = [null];
-    if (!api.GetWindowThreadProcessId(hWnd, processId) || processId[0] === process.pid) return false;
+    if (!api.GetWindowThreadProcessId(hWnd, processId) || processId[0] === process.pid) {
+      this.captureResult = "前台窗口无法读取或属于 Obsidian";
+      return false;
+    }
 
     const windowRect: NativeRect = { left: 0, top: 0, right: 0, bottom: 0 };
-    if (!api.GetWindowRect(hWnd, windowRect)) return false;
+    if (!api.GetWindowRect(hWnd, windowRect)) {
+      this.captureResult = "无法读取前台窗口位置";
+      return false;
+    }
     const displayPhysical = screen.dipToScreenRect(null, display.bounds);
-    if (!rectCenterIsInside(windowRect, displayPhysical)) return false;
+    if (!rectCenterIsInside(windowRect, displayPhysical)) {
+      this.captureResult = "前台窗口位于其他屏幕";
+      return false;
+    }
+    const initiallyMaximized = Boolean(api.IsZoomed(hWnd));
+    const workAreaPhysical = screen.dipToScreenRect(null, display.workArea);
+    if (!initiallyMaximized && !isFullHeightEdgeWindow(windowRect, workAreaPhysical, side)) {
+      this.captureResult = "前台窗口未最大化，也未贴靠屏幕边缘";
+      return false;
+    }
 
-    this.managed = { hWnd, restoredForDock: false };
+    this.managed = {
+      hWnd,
+      initiallyMaximized,
+      originalBounds: {
+        x: windowRect.left,
+        y: windowRect.top,
+        width: windowRect.right - windowRect.left,
+        height: windowRect.bottom - windowRect.top
+      },
+      changedForDock: false
+    };
+    this.captureResult = initiallyMaximized ? "已接管最大化窗口" : "已接管贴边窗口";
     return true;
   }
 
@@ -85,13 +137,14 @@ export class WindowsAdjacentWindow {
     if (!api || !managed) return false;
     if (!api.IsWindow(managed.hWnd)) {
       this.managed = null;
+      this.captureResult = "原前台窗口已关闭";
       return false;
     }
 
-    if (!managed.restoredForDock) {
+    if (api.IsZoomed(managed.hWnd)) {
       if (!api.ShowWindowAsync(managed.hWnd, SW_RESTORE)) throw new Error("无法把原前台窗口切换为可调整状态。");
-      managed.restoredForDock = true;
     }
+    managed.changedForDock = true;
     const physical = screen.dipToScreenRect(null, bounds);
     const moved = api.SetWindowPos(
       managed.hWnd,
@@ -103,19 +156,78 @@ export class WindowsAdjacentWindow {
       SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
     );
     if (!moved) throw new Error("无法同步调整原前台窗口。");
+    this.scheduleVerification(managed, {
+      x: Math.round(physical.x),
+      y: Math.round(physical.y),
+      width: Math.max(1, Math.round(physical.width)),
+      height: Math.max(1, Math.round(physical.height))
+    });
     return true;
   }
 
   restore(): void {
+    if (this.verificationTimer !== null) clearTimeout(this.verificationTimer);
+    this.verificationTimer = null;
     const managed = this.managed;
     this.managed = null;
     const api = this.ensureApi();
-    if (!api || !managed?.restoredForDock) return;
+    if (!api || !managed?.changedForDock) return;
     try {
-      if (api.IsWindow(managed.hWnd)) api.ShowWindowAsync(managed.hWnd, SW_MAXIMIZE);
+      if (!api.IsWindow(managed.hWnd)) return;
+      if (managed.initiallyMaximized) api.ShowWindowAsync(managed.hWnd, SW_MAXIMIZE);
+      else {
+        if (api.IsZoomed(managed.hWnd)) api.ShowWindowAsync(managed.hWnd, SW_RESTORE);
+        api.SetWindowPos(
+          managed.hWnd,
+          null,
+          managed.originalBounds.x,
+          managed.originalBounds.y,
+          managed.originalBounds.width,
+          managed.originalBounds.height,
+          SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+        );
+      }
     } catch {
       // The other application may already be closing.
     }
+  }
+
+  private scheduleVerification(managed: ManagedWindow, desired: Rectangle, retryCount = 0): void {
+    if (this.verificationTimer !== null) clearTimeout(this.verificationTimer);
+    this.verificationTimer = setTimeout(() => {
+      this.verificationTimer = null;
+      const api = this.ensureApi();
+      if (!api || managed !== this.managed || !api.IsWindow(managed.hWnd)) return;
+      const actual: NativeRect = { left: 0, top: 0, right: 0, bottom: 0 };
+      if (!api.GetWindowRect(managed.hWnd, actual)) return;
+      const gap = Math.max(
+        Math.abs(actual.left - desired.x),
+        Math.abs(actual.top - desired.y),
+        Math.abs(actual.right - desired.x - desired.width),
+        Math.abs(actual.bottom - desired.y - desired.height)
+      );
+      if (gap <= 12) return;
+      if (retryCount >= 1) {
+        this.captureResult = "原前台窗口未接受目标尺寸";
+        return;
+      }
+      try {
+        if (api.IsZoomed(managed.hWnd)) api.ShowWindowAsync(managed.hWnd, SW_RESTORE);
+        const accepted = api.SetWindowPos(
+          managed.hWnd,
+          null,
+          desired.x,
+          desired.y,
+          desired.width,
+          desired.height,
+          SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+        );
+        if (accepted) this.scheduleVerification(managed, desired, retryCount + 1);
+        else this.captureResult = "原前台窗口拒绝调整尺寸";
+      } catch {
+        this.captureResult = "原前台窗口拒绝调整尺寸";
+      }
+    }, 140);
   }
 
   private ensureApi(): AdjacentNativeApi | null {
