@@ -16,7 +16,6 @@ const NATIVE_REFLOW_DEBOUNCE_MS = 150;
 const NATIVE_NOTIFICATION_SUPPRESSION_MS = 1000;
 const INTERACTIVE_RESIZE_INTERVAL_MS = 50;
 const WIDTH_PERSIST_DEBOUNCE_MS = 350;
-const PROGRAMMATIC_BOUNDS_MARK_MS = 250;
 
 type WindowState = "hidden" | "creating" | "visible" | "disposed";
 
@@ -48,11 +47,9 @@ export class DockWindowManager {
   private hideVerificationTimer: ReturnType<typeof setTimeout> | null = null;
   private interactiveResizeTimer: ReturnType<typeof setTimeout> | null = null;
   private widthPersistTimer: ReturnType<typeof setTimeout> | null = null;
-  private programmaticBoundsTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingInteractiveWidth: number | null = null;
   private pendingPersistPercent: number | null = null;
   private runtimeWidthPercent: number | null = null;
-  private programmaticBounds: Rectangle | null = null;
   private trayCompatibility: TrayCompatibilityStatus = "not-detected";
   private fullScreenAppOpen: boolean | null = null;
   private readonly displayTopologyChanged = (): void => { void this.serial.run(() => this.reflow(false)); };
@@ -137,7 +134,6 @@ export class DockWindowManager {
     this.state = "disposed";
     this.clearPositionNotificationTimer();
     this.clearHideVerificationTimer();
-    this.clearProgrammaticBoundsMarker();
     this.screen.removeListener("display-added", this.displayTopologyChanged);
     this.screen.removeListener("display-removed", this.displayTopologyChanged);
     this.screen.removeListener("display-metrics-changed", this.displayMetricsChanged);
@@ -200,13 +196,13 @@ export class DockWindowManager {
 
   private async ensureWindow(file: TFile): Promise<void> {
     if (this.browserWindow && !this.browserWindow.isDestroyed() && this.leaf) {
-      await this.leaf.openFile(file, { active: true });
+      await this.leaf.setViewState({ type: "markdown", state: { file: file.path, mode: "source" }, active: true });
       return;
     }
 
     const leaf = this.app.workspace.openPopoutLeaf();
     try {
-      await leaf.openFile(file, { active: true });
+      await leaf.setViewState({ type: "markdown", state: { file: file.path, mode: "source" }, active: true });
       const container = leaf.getContainer();
       const domWindow = container.win;
       const browserWindow = await getBrowserWindowForDom(domWindow);
@@ -232,7 +228,7 @@ export class DockWindowManager {
         if (browserWindow !== this.browserWindow || this.state !== "visible") return;
         void this.serial.run(() => this.hide());
       });
-      browserWindow.on("resize", () => this.onWindowResize(browserWindow));
+      browserWindow.on("will-resize", (_event, bounds) => this.onWindowResize(browserWindow, bounds));
       browserWindow.on("show", () => {
         if (browserWindow !== this.browserWindow || this.state === "visible" || this.state === "creating") return;
         hideWindowCompletely(browserWindow);
@@ -410,11 +406,8 @@ export class DockWindowManager {
     this.hideVerificationTimer = null;
   }
 
-  private onWindowResize(browserWindow: BrowserWindowLike): void {
+  private onWindowResize(browserWindow: BrowserWindowLike, bounds: Rectangle): void {
     if (browserWindow !== this.browserWindow || this.state !== "visible" || browserWindow.isDestroyed()) return;
-    const bounds = browserWindow.getBounds();
-    if (this.programmaticBounds && !boundsDiffer(bounds, this.programmaticBounds)) return;
-    this.clearProgrammaticBoundsMarker();
     const display = this.getTargetDisplay();
     if (!display) return;
     this.pendingInteractiveWidth = clampDockWidth(display.bounds.width, bounds.width);
@@ -507,13 +500,13 @@ export class DockWindowManager {
     const browserWindow = this.browserWindow;
     if (!browserWindow || browserWindow.isDestroyed()) return;
     if (!boundsDiffer(browserWindow.getBounds(), bounds)) return;
-    this.markProgrammaticBounds(bounds);
     browserWindow.setBounds(bounds, false);
   }
 
   private syncAdjacentWindow(dockBounds: Rectangle, side: DockSettings["side"]): void {
     if (!this.baseWorkArea) return;
     try {
+      if (this.appbar.isRegistered && this.adjacentWindow.isManagingMaximizedWindow()) return;
       this.adjacentWindow.arrange(this.screen, computeAdjacentRect(this.baseWorkArea, dockBounds, side));
     } catch (error) {
       this.adjacentWindow.restore();
@@ -545,21 +538,6 @@ export class DockWindowManager {
     return handles;
   }
 
-  private markProgrammaticBounds(bounds: Rectangle): void {
-    this.programmaticBounds = { ...bounds };
-    if (this.programmaticBoundsTimer !== null) clearTimeout(this.programmaticBoundsTimer);
-    this.programmaticBoundsTimer = setTimeout(() => {
-      this.programmaticBoundsTimer = null;
-      this.programmaticBounds = null;
-    }, PROGRAMMATIC_BOUNDS_MARK_MS);
-  }
-
-  private clearProgrammaticBoundsMarker(): void {
-    if (this.programmaticBoundsTimer !== null) clearTimeout(this.programmaticBoundsTimer);
-    this.programmaticBoundsTimer = null;
-    this.programmaticBounds = null;
-  }
-
   private focusEditorSoon(): void {
     const leaf = this.leaf;
     const domWindow = this.domWindow;
@@ -585,7 +563,6 @@ export class DockWindowManager {
     this.fullScreenAppOpen = null;
     this.clearPositionNotificationTimer();
     this.clearHideVerificationTimer();
-    this.clearProgrammaticBoundsMarker();
     if (!this.isDisposed()) this.state = "hidden";
   }
 

@@ -131,6 +131,10 @@ export class WindowsAdjacentWindow {
     return true;
   }
 
+  isManagingMaximizedWindow(): boolean {
+    return this.managed?.initiallyMaximized ?? false;
+  }
+
   arrange(screen: ScreenLike, bounds: Rectangle): boolean {
     const api = this.ensureApi();
     const managed = this.managed;
