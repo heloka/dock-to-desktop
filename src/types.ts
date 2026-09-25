@@ -35,6 +35,7 @@ export interface BrowserWindowLike {
   isVisible(): boolean;
   moveBottom?(): void;
   on(event: "closed" | "minimize" | "resize" | "show", callback: () => void): void;
+  on(event: "will-resize", callback: (event: unknown, newBounds: Rectangle) => void): void;
   prependOnceListener(event: "close", callback: (event: WindowCloseEventLike) => void): void;
   removeListener(event: "close", callback: (event: WindowCloseEventLike) => void): void;
   restore(): void;
